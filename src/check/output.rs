@@ -100,7 +100,8 @@ fn display_text(report: &CheckReport, verbose: bool) -> Result<()> {
 
     // ── Containers ────────────────────────────────────────────────────────
     print_section(&format!("CONTAINERS ({})", report.containers.len()));
-    for c in &report.containers {
+    for (i, c) in report.containers.iter().enumerate() {
+        println!("  [{}/{}]", i + 1, report.containers.len());
         display_container_text(c, verbose);
     }
 
