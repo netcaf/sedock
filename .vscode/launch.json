@@ -1,0 +1,17 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Rust",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/target/x86_64-unknown-linux-musl/debug/sedock",
+            "args": [
+                "check",
+            ],
+            "cwd": "${workspaceFolder}",
+            "stopOnEntry": false,
+            "preLaunchTask": "rust: cargo build"
+        }
+    ]
+}

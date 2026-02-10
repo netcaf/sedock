@@ -1,21 +1,39 @@
-pub mod collector;
 pub mod container;
+pub mod collector;
+pub mod engine;
+pub mod events;
+pub mod host;
 pub mod output;
+pub mod report;
 
 use crate::utils::Result;
+use report::CheckReport;
 
 pub fn run_check(container: Option<String>, output_format: &str, verbose: bool) -> Result<()> {
-    println!("Collecting Docker information...\n");
-    
-    // 收集容器信息
-    let containers = if let Some(cid) = container {
-        vec![collector::collect_container_info(&cid, verbose)?]
-    } else {
-        collector::collect_all_containers(verbose)?
+    eprintln!("Collecting host information...");
+    let host = host::collect()?;
+
+    eprintln!("Collecting Docker engine information...");
+    let engine = engine::collect(verbose)?;
+
+    eprintln!("Collecting container information...");
+    let containers = match container {
+        Some(ref id) => vec![collector::collect_one(id, verbose)?],
+        None         => collector::collect_all(verbose)?,
     };
-    
-    // 输出结果
-    output::display_containers(&containers, output_format)?;
-    
-    Ok(())
+
+    eprintln!("Collecting recent events...");
+    let ev = events::collect(events::default_since());
+
+    let report = CheckReport {
+        collected_at: chrono::Local::now()
+            .format("%Y-%m-%d %H:%M:%S %z")
+            .to_string(),
+        host,
+        engine,
+        containers,
+        events: ev,
+    };
+
+    output::display(&report, output_format, verbose)
 }

@@ -1,230 +1,366 @@
+//! 容器信息收集
+//! 来源：docker inspect / docker stats / docker logs / /proc
+
 use crate::check::container::*;
 use crate::utils::{Result, SedockerError};
 use std::process::Command;
 
-pub fn collect_all_containers(verbose: bool) -> Result<Vec<ContainerInfo>> {
-    // 获取所有容器 ID
-    let output = Command::new("docker")
-        .args(&["ps", "-a", "--format", "{{.ID}}"])
-        .output()
-        .map_err(|e| SedockerError::Docker(format!("Failed to run docker command: {}", e)))?;
-    
-    if !output.status.success() {
-        return Err(SedockerError::Docker(
-            "Docker command failed. Is Docker installed?".to_string()
-        ));
-    }
-    
-    let container_ids = String::from_utf8_lossy(&output.stdout);
+const LOG_TAIL_LINES: &str = "50";
+
+// ── 公开接口 ────────────────────────────────────────────────────────────────
+
+pub fn collect_all(verbose: bool) -> Result<Vec<ContainerInfo>> {
+    let ids = list_container_ids()?;
     let mut containers = Vec::new();
-    
-    for id in container_ids.lines() {
-        let id = id.trim();
-        if !id.is_empty() {
-            match collect_container_info(id, verbose) {
-                Ok(info) => containers.push(info),
-                Err(e) => eprintln!("Warning: Failed to collect info for {}: {}", id, e),
-            }
+
+    for id in &ids {
+        match collect_one(id, verbose) {
+            Ok(info) => containers.push(info),
+            Err(e)   => eprintln!("warn: skipping {}: {}", id, e),
         }
     }
-    
+
     Ok(containers)
 }
 
-pub fn collect_container_info(container_id: &str, verbose: bool) -> Result<ContainerInfo> {
-    // 使用 docker inspect 获取详细信息
-    let output = Command::new("docker")
-        .args(&["inspect", container_id])
-        .output()
-        .map_err(|e| SedockerError::Docker(format!("Failed to inspect container: {}", e)))?;
-    
-    if !output.status.success() {
-        return Err(SedockerError::Docker(
-            format!("Container {} not found", container_id)
-        ));
+pub fn collect_one(id: &str, verbose: bool) -> Result<ContainerInfo> {
+    let json = docker_inspect(id)?;
+    let mut info = parse_inspect(&json, verbose)?;
+
+    // 仅 running 容器才有 stats
+    if info.status == "running" {
+        info.resource_usage = fetch_stats(id);
+        info.log_tail       = fetch_logs(id, LOG_TAIL_LINES);
+    } else {
+        // exited 容器也拿日志，有助于排障
+        info.log_tail = fetch_logs(id, LOG_TAIL_LINES);
     }
-    
-    let json_str = String::from_utf8_lossy(&output.stdout);
-    parse_container_json(&json_str, verbose)
+
+    Ok(info)
 }
 
-fn parse_container_json(json_str: &str, verbose: bool) -> Result<ContainerInfo> {
-    let value: serde_json::Value = serde_json::from_str(json_str)
-        .map_err(|e| SedockerError::Parse(format!("Failed to parse JSON: {}", e)))?;
-    
-    let container = value.as_array()
-        .and_then(|arr| arr.first())
-        .ok_or_else(|| SedockerError::Parse("Empty JSON array".to_string()))?;
-    
-    // 提取基本信息
-    let id = container["Id"]
-        .as_str()
-        .unwrap_or("unknown")
-        .chars()
-        .take(12)
-        .collect();
-    
-    let name = container["Name"]
-        .as_str()
-        .unwrap_or("unknown")
-        .trim_start_matches('/')
-        .to_string();
-    
-    let image = container["Config"]["Image"]
-        .as_str()
-        .unwrap_or("unknown")
-        .to_string();
-    
-    let status = container["State"]["Status"]
-        .as_str()
-        .unwrap_or("unknown")
-        .to_string();
-    
-    let created = container["Created"]
-        .as_str()
-        .unwrap_or("unknown")
-        .to_string();
-    
-    // 提取端口映射
-    let ports = extract_ports(container);
-    
-    // 提取挂载信息
-    let mounts = extract_mounts(container);
-    
-    // 提取网络信息
-    let network = extract_network(container);
-    
-    // 提取资源信息
-    let resources = extract_resources(container);
-    
-    // 获取进程信息（如果 verbose）
+// ── docker ps / inspect ─────────────────────────────────────────────────────
+
+fn list_container_ids() -> Result<Vec<String>> {
+    let out = Command::new("docker")
+        .args(&["ps", "-a", "--format", "{{.ID}}"])
+        .output()
+        .map_err(|e| SedockerError::Docker(format!("docker ps failed: {}", e)))?;
+
+    if !out.status.success() {
+        return Err(SedockerError::Docker(
+            "docker ps failed — is Docker running?".to_string()
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect())
+}
+
+fn docker_inspect(id: &str) -> Result<serde_json::Value> {
+    let out = Command::new("docker")
+        .args(&["inspect", id])
+        .output()
+        .map_err(|e| SedockerError::Docker(format!("docker inspect failed: {}", e)))?;
+
+    if !out.status.success() {
+        return Err(SedockerError::Docker(format!("container {} not found", id)));
+    }
+
+    let arr: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| SedockerError::Parse(format!("inspect JSON: {}", e)))?;
+
+    arr.as_array()
+        .and_then(|a| a.first())
+        .cloned()
+        .ok_or_else(|| SedockerError::Parse("empty inspect result".to_string()))
+}
+
+// ── inspect パーサー ─────────────────────────────────────────────────────────
+
+fn parse_inspect(c: &serde_json::Value, verbose: bool) -> Result<ContainerInfo> {
+    let id = c["Id"].as_str().unwrap_or("").chars().take(12).collect();
+    let name = c["Name"].as_str().unwrap_or("")
+        .trim_start_matches('/').to_string();
+    let image    = str_val(c, &["Config", "Image"]);
+    let image_id = c["Image"].as_str().unwrap_or("").chars().take(19).collect();
+
+    let status      = str_val(c, &["State", "Status"]);
+    let exit_code   = c["State"]["ExitCode"].as_i64().unwrap_or(0);
+    let oom_killed  = c["State"]["OOMKilled"].as_bool().unwrap_or(false);
+    let created     = str_val(c, &["Created"]);
+    let started_at  = str_val(c, &["State", "StartedAt"]);
+    let finished_at = str_val(c, &["State", "FinishedAt"]);
+
+    let restart_policy = str_val(c, &["HostConfig", "RestartPolicy", "Name"]);
+    let restart_count  = c["RestartCount"].as_i64().unwrap_or(0);
+    let privileged     = c["HostConfig"]["Privileged"].as_bool().unwrap_or(false);
+
+    let env = if verbose {
+        c["Config"]["Env"].as_array()
+            .map(|a| a.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect())
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
+
+    let ports        = parse_ports(c);
+    let networks     = parse_networks(c);
+    let network_mode = str_val(c, &["HostConfig", "NetworkMode"]);
+    let mounts       = parse_mounts(c);
+    let resource_config = parse_resource_config(c);
+
     let process_info = if verbose {
-        extract_process_info(container)
+        parse_process_info(c)
     } else {
         None
     };
-    
+
     Ok(ContainerInfo {
-        id,
-        name,
-        image,
-        status,
-        created,
-        ports,
-        mounts,
-        network,
-        resources,
+        id, name, image, image_id,
+        status, exit_code, oom_killed,
+        created, started_at, finished_at,
+        restart_policy, restart_count, privileged, env,
+        ports, networks, network_mode, mounts,
+        resource_config,
+        resource_usage: None,
+        log_tail: None,
         process_info,
     })
 }
 
-fn extract_ports(container: &serde_json::Value) -> Vec<PortMapping> {
+fn parse_ports(c: &serde_json::Value) -> Vec<PortMapping> {
     let mut ports = Vec::new();
-    
-    if let Some(port_bindings) = container["HostConfig"]["PortBindings"].as_object() {
-        for (container_port, bindings) in port_bindings {
-            if let Some(bindings_arr) = bindings.as_array() {
-                for binding in bindings_arr {
+    if let Some(bindings) = c["HostConfig"]["PortBindings"].as_object() {
+        for (container_port, bindings_arr) in bindings {
+            let (cport, proto) = container_port
+                .split_once('/')
+                .map(|(p, r)| (p.to_string(), r.to_string()))
+                .unwrap_or_else(|| (container_port.clone(), "tcp".to_string()));
+
+            if let Some(arr) = bindings_arr.as_array() {
+                for b in arr {
                     ports.push(PortMapping {
-                        host_port: binding["HostPort"]
-                            .as_str()
-                            .unwrap_or("0")
-                            .to_string(),
-                        container_port: container_port.to_string(),
-                        protocol: if container_port.contains("/tcp") {
-                            "tcp".to_string()
-                        } else {
-                            "udp".to_string()
-                        },
+                        host_ip:        b["HostIp"].as_str().unwrap_or("0.0.0.0").to_string(),
+                        host_port:      b["HostPort"].as_str().unwrap_or("").to_string(),
+                        container_port: cport.clone(),
+                        protocol:       proto.clone(),
                     });
                 }
             }
         }
     }
-    
     ports
 }
 
-fn extract_mounts(container: &serde_json::Value) -> Vec<MountInfo> {
-    let mut mounts = Vec::new();
-    
-    if let Some(mounts_arr) = container["Mounts"].as_array() {
-        for mount in mounts_arr {
-            mounts.push(MountInfo {
-                source: mount["Source"].as_str().unwrap_or("").to_string(),
-                destination: mount["Destination"].as_str().unwrap_or("").to_string(),
-                mode: mount["Mode"].as_str().unwrap_or("").to_string(),
-                rw: mount["RW"].as_bool().unwrap_or(false),
+fn parse_networks(c: &serde_json::Value) -> Vec<NetworkEntry> {
+    let mut result = Vec::new();
+    if let Some(networks) = c["NetworkSettings"]["Networks"].as_object() {
+        for (name, n) in networks {
+            result.push(NetworkEntry {
+                network_name: name.clone(),
+                ip_address:   n["IPAddress"].as_str().unwrap_or("").to_string(),
+                gateway:      n["Gateway"].as_str().unwrap_or("").to_string(),
+                mac_address:  n["MacAddress"].as_str().unwrap_or("").to_string(),
             });
         }
     }
-    
-    mounts
+    result
 }
 
-fn extract_network(container: &serde_json::Value) -> NetworkInfo {
-    let networks = &container["NetworkSettings"]["Networks"];
+fn parse_mounts(c: &serde_json::Value) -> Vec<MountInfo> {
+    c["Mounts"].as_array()
+        .map(|arr| arr.iter().map(|m| {
+            let source = m["Source"].as_str().unwrap_or("").to_string();
+            let permissions = if !source.is_empty() && std::path::Path::new(&source).exists() {
+                collect_path_permissions(&source)
+            } else {
+                vec![]
+            };
+            
+            MountInfo {
+                mount_type:  m["Type"].as_str().unwrap_or("").to_string(),
+                source,
+                destination: m["Destination"].as_str().unwrap_or("").to_string(),
+                mode:        m["Mode"].as_str().unwrap_or("").to_string(),
+                rw:          m["RW"].as_bool().unwrap_or(false),
+                permissions,
+            }
+        }).collect())
+        .unwrap_or_default()
+}
+
+fn collect_path_permissions(path: &str) -> Vec<crate::check::container::PathPermission> {
+    use std::os::unix::fs::MetadataExt;
+    use std::fs;
     
-    // 获取第一个网络的信息
-    let first_network = networks.as_object()
-        .and_then(|obj| obj.values().next());
+    let mut permissions = Vec::new();
     
-    NetworkInfo {
-        ip_address: first_network
-            .and_then(|n| n["IPAddress"].as_str())
-            .unwrap_or("")
-            .to_string(),
-        gateway: first_network
-            .and_then(|n| n["Gateway"].as_str())
-            .unwrap_or("")
-            .to_string(),
-        mac_address: first_network
-            .and_then(|n| n["MacAddress"].as_str())
-            .unwrap_or("")
-            .to_string(),
-        network_mode: container["HostConfig"]["NetworkMode"]
-            .as_str()
-            .unwrap_or("default")
-            .to_string(),
+    if let Ok(metadata) = fs::metadata(path) {
+        permissions.push(crate::check::container::PathPermission {
+            path: path.to_string(),
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+            mode: metadata.mode(),
+        });
+    }
+    
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            if let Ok(metadata) = entry.metadata() {
+                permissions.push(crate::check::container::PathPermission {
+                    path: entry.path().to_string_lossy().to_string(),
+                    uid: metadata.uid(),
+                    gid: metadata.gid(),
+                    mode: metadata.mode(),
+                });
+                
+                if metadata.is_dir() {
+                    permissions.extend(collect_path_permissions(&entry.path().to_string_lossy()));
+                }
+            }
+        }
+    }
+    
+    permissions
+}
+
+fn parse_resource_config(c: &serde_json::Value) -> ResourceConfig {
+    let hc = &c["HostConfig"];
+    ResourceConfig {
+        cpu_shares:   hc["CpuShares"].as_u64().unwrap_or(0),
+        cpu_period:   hc["CpuPeriod"].as_u64().unwrap_or(0),
+        cpu_quota:    hc["CpuQuota"].as_i64().unwrap_or(0),
+        memory_limit: hc["Memory"].as_u64().unwrap_or(0),
+        memory_swap:  hc["MemorySwap"].as_i64().unwrap_or(0),
+        pids_limit:   hc["PidsLimit"].as_i64().unwrap_or(0),
     }
 }
 
-fn extract_resources(container: &serde_json::Value) -> ResourceInfo {
-    ResourceInfo {
-        cpu_shares: container["HostConfig"]["CpuShares"]
-            .as_u64()
-            .unwrap_or(0),
-        memory_limit: container["HostConfig"]["Memory"]
-            .as_u64()
-            .unwrap_or(0),
-        memory_usage: None, // 需要额外的 stats 调用
-    }
-}
+fn parse_process_info(c: &serde_json::Value) -> Option<ProcessInfo> {
+    let host_pid = c["State"]["Pid"].as_i64()? as i32;
+    if host_pid <= 0 { return None; }
 
-fn extract_process_info(container: &serde_json::Value) -> Option<ProcessInfo> {
-    let pid = container["State"]["Pid"].as_i64()? as i32;
-    
-    if pid <= 0 {
-        return None;
-    }
-    
-    // 从 /proc 读取信息
-    let status_path = format!("/proc/{}/status", pid);
-    let uid = std::fs::read_to_string(&status_path)
-        .ok()
-        .and_then(|content| {
-            content.lines()
-                .find(|line| line.starts_with("Uid:"))
-                .and_then(|line| line.split_whitespace().nth(1))
-                .and_then(|s| s.parse().ok())
-        })
+    let status_path = format!("/proc/{}/status", host_pid);
+    let uid = std::fs::read_to_string(&status_path).ok()
+        .and_then(|s| s.lines()
+            .find(|l| l.starts_with("Uid:"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|v| v.parse().ok()))
         .unwrap_or(0);
-    
-    let cmdline_path = format!("/proc/{}/cmdline", pid);
-    let cmd = std::fs::read_to_string(&cmdline_path)
-        .ok()
-        .map(|s| s.replace('\0', " "))
+
+    let cmd = std::fs::read_to_string(format!("/proc/{}/cmdline", host_pid)).ok()
+        .map(|s| s.replace('\0', " ").trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
-    
-    Some(ProcessInfo { pid, uid, cmd })
+
+    Some(ProcessInfo { host_pid, uid, cmd })
+}
+
+// ── docker stats ─────────────────────────────────────────────────────────────
+
+fn fetch_stats(id: &str) -> Option<ResourceUsage> {
+    let out = Command::new("docker")
+        .args(&[
+            "stats", "--no-stream",
+            "--format", "{{json .}}",
+            id,
+        ])
+        .output()
+        .ok()?;
+
+    if !out.status.success() { return None; }
+
+    let j: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+
+    // docker stats json 格式：字段值为字符串，如 "1.5GiB / 3.8GiB"
+    let memory_usage  = parse_stat_mem(j["MemUsage"].as_str().unwrap_or(""));
+    let cpu_percent   = parse_stat_pct(j["CPUPerc"].as_str().unwrap_or(""));
+    let mem_percent   = parse_stat_pct(j["MemPerc"].as_str().unwrap_or(""));
+    let (net_rx, net_tx) = parse_stat_pair(j["NetIO"].as_str().unwrap_or(""));
+    let (blk_r, blk_w)  = parse_stat_pair(j["BlockIO"].as_str().unwrap_or(""));
+    let pids = j["PIDs"].as_str()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    Some(ResourceUsage {
+        cpu_percent,
+        memory_usage: memory_usage.0,
+        memory_limit: memory_usage.1,
+        memory_percent: mem_percent,
+        block_read: blk_r,
+        block_write: blk_w,
+        net_rx,
+        net_tx,
+        pids,
+    })
+}
+
+/// 解析 "1.5GiB / 3.8GiB" → (used_bytes, limit_bytes)
+fn parse_stat_mem(s: &str) -> (u64, u64) {
+    let parts: Vec<&str> = s.split('/').collect();
+    let used  = parts.get(0).map(|v| parse_size_to_bytes(v.trim())).unwrap_or(0);
+    let limit = parts.get(1).map(|v| parse_size_to_bytes(v.trim())).unwrap_or(0);
+    (used, limit)
+}
+
+/// 解析 "1.5GiB" → bytes
+fn parse_size_to_bytes(s: &str) -> u64 {
+    let s = s.trim();
+    if s == "0B" || s.is_empty() { return 0; }
+    let (num_part, unit) = s.split_at(
+        s.find(|c: char| c.is_alphabetic()).unwrap_or(s.len())
+    );
+    let num: f64 = num_part.trim().parse().unwrap_or(0.0);
+    match unit.to_uppercase().trim_end_matches('B') {
+        "KI" | "K" => (num * 1024.0) as u64,
+        "MI" | "M" => (num * 1024.0 * 1024.0) as u64,
+        "GI" | "G" => (num * 1024.0 * 1024.0 * 1024.0) as u64,
+        "TI" | "T" => (num * 1024.0 * 1024.0 * 1024.0 * 1024.0) as u64,
+        _ => num as u64,
+    }
+}
+
+/// 解析 "1.5%" → f64
+fn parse_stat_pct(s: &str) -> f64 {
+    s.trim_end_matches('%').parse().unwrap_or(0.0)
+}
+
+/// 解析 "1.5MB / 2.3MB" → (left_bytes, right_bytes)
+fn parse_stat_pair(s: &str) -> (u64, u64) {
+    let parts: Vec<&str> = s.split('/').collect();
+    let a = parts.get(0).map(|v| parse_size_to_bytes(v.trim())).unwrap_or(0);
+    let b = parts.get(1).map(|v| parse_size_to_bytes(v.trim())).unwrap_or(0);
+    (a, b)
+}
+
+// ── docker logs ─────────────────────────────────────────────────────────────
+
+fn fetch_logs(id: &str, tail: &str) -> Option<Vec<String>> {
+    let out = Command::new("docker")
+        .args(&["logs", "--tail", tail, "--timestamps", id])
+        .output()
+        .ok()?;
+
+    // docker logs 写 stderr
+    let combined = [out.stdout.as_slice(), out.stderr.as_slice()].concat();
+    let s = String::from_utf8_lossy(&combined);
+
+    Some(s.lines().map(String::from).collect())
+}
+
+// ── 工具 ────────────────────────────────────────────────────────────────────
+
+fn str_val(c: &serde_json::Value, path: &[&str]) -> String {
+    let mut cur = c;
+    for key in path {
+        cur = &cur[key];
+    }
+    cur.as_str().unwrap_or("").to_string()
 }
