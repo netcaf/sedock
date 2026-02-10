@@ -22,7 +22,7 @@ pub fn collect(since: &str) -> Vec<DockerEvent> {
         .args(&[
             "events",
             "--since", since,
-            "--until", "0s",  // 到"现在"截止，不阻塞
+            "--until", "0s",
             "--format", "{{json .}}",
         ])
         .output()
@@ -49,7 +49,7 @@ pub fn collect_with_limit(since: &str, limit: usize) -> Vec<DockerEvent> {
         .args(&[
             "events",
             "--since", since,
-            "--until", "0s",  // 到"现在"截止，不阻塞
+            "--until", "0s",
             "--format", "{{json .}}",
         ])
         .output()

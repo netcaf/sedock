@@ -69,28 +69,102 @@ pub fn collect(verbose: bool) -> Result<EngineInfo> {
 // ── docker version ──────────────────────────────────────────────────────────
 
 fn collect_version() -> Result<VersionInfo> {
+    // Try JSON format first
     let output = Command::new("docker")
         .args(&["version", "-f", "json"])
         .output()
         .map_err(|e| SedockerError::Docker(format!("docker version failed: {}", e)))?;
 
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(SedockerError::Docker(
-            "docker version command failed — is Docker running?".to_string()
+            format!("docker version command failed — is Docker running? Error: {}", stderr)
         ));
     }
 
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| SedockerError::Parse(format!("docker version JSON: {}", e)))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    
+    // Check if output is valid JSON (not just the word "json")
+    if !trimmed.is_empty() && trimmed != "json" {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            let server = &json["Server"];
+            return Ok(VersionInfo {
+                server_version: str_val(&server["Version"]),
+                api_version:    str_val(&server["ApiVersion"]),
+                go_version:     str_val(&server["GoVersion"]),
+                os_arch:        format!("{}/{}", str_val(&server["Os"]), str_val(&server["Arch"])),
+                build_time:     str_val(&server["BuildTime"]),
+            });
+        }
+    }
+    
+    // Fallback to plain text parsing for older Docker versions
+    let output = Command::new("docker")
+        .args(&["version"])
+        .output()
+        .map_err(|e| SedockerError::Docker(format!("docker version (plain) failed: {}", e)))?;
 
-    let server = &json["Server"];
+    if !output.status.success() {
+        return Err(SedockerError::Docker("docker version command failed".to_string()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_version_plain(&stdout)
+}
+
+fn parse_version_plain(output: &str) -> Result<VersionInfo> {
+    let mut server_version = String::new();
+    let mut api_version = String::new();
+    let mut go_version = String::new();
+    let mut os = String::new();
+    let mut arch = String::new();
+    let mut build_time = String::new();
+
+    let mut in_server_section = false;
+    
+    for line in output.lines() {
+        let line = line.trim();
+        
+        if line.starts_with("Server:") {
+            in_server_section = true;
+            continue;
+        } else if line.starts_with("Client:") {
+            in_server_section = false;
+            continue;
+        }
+        
+        if !in_server_section {
+            continue;
+        }
+        
+        if line.starts_with("Version:") {
+            server_version = line.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
+        } else if line.starts_with("API version:") {
+            api_version = line.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
+        } else if line.starts_with("Go version:") {
+            go_version = line.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
+        } else if line.starts_with("OS/Arch:") {
+            let parts: Vec<&str> = line.splitn(2, ':').nth(1).unwrap_or("").trim().split('/').collect();
+            if parts.len() >= 2 {
+                os = parts[0].trim().to_string();
+                arch = parts[1].trim().to_string();
+            }
+        } else if line.starts_with("Built:") {
+            build_time = line.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
+        }
+    }
+
+    if server_version.is_empty() {
+        return Err(SedockerError::Parse("Could not parse docker version output".to_string()));
+    }
 
     Ok(VersionInfo {
-        server_version: str_val(&server["Version"]),
-        api_version:    str_val(&server["ApiVersion"]),
-        go_version:     str_val(&server["GoVersion"]),
-        os_arch:        format!("{}/{}", str_val(&server["Os"]), str_val(&server["Arch"])),
-        build_time:     str_val(&server["BuildTime"]),
+        server_version,
+        api_version,
+        go_version,
+        os_arch: format!("{}/{}", os, arch),
+        build_time,
     })
 }
 

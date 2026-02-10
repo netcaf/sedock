@@ -218,14 +218,6 @@ fn display_container_text(c: &ContainerInfo, verbose: bool) {
             fmt_bytes(u.block_read), fmt_bytes(u.block_write));
     }
 
-    // verbose: env
-    if verbose && !c.env.is_empty() {
-        println!("      Env:");
-        for e in &c.env {
-            println!("        {}", e);
-        }
-    }
-
     // 进程 (现在在普通模式下也显示)
     if !c.processes.is_empty() {
         println!("      Processes  :");
@@ -239,6 +231,14 @@ fn display_container_text(c: &ContainerInfo, verbose: bool) {
             
             println!("        PID {} (PPID {})  {}:{}  {}{}{}",
                 p.pid, p.ppid, p.uid, p.gid, p.cmd, exe_info, cwd_info);
+        }
+    }
+
+    // verbose: env
+    if verbose && !c.env.is_empty() {
+        println!("      Env:");
+        for e in &c.env {
+            println!("        {}", e);
         }
     }
 
