@@ -1,0 +1,42 @@
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(name = "sedocker")]
+#[command(about = "Docker monitoring and inspection tool", long_about = None)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Monitor file access in a directory
+    Monitor {
+        /// Directory to monitor
+        #[arg(short, long)]
+        directory: String,
+        
+        /// Show container information
+        #[arg(long, default_value = "false")]
+        show_container: bool,
+        
+        /// Output format (text or json)
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+    
+    /// Check and collect Docker container information
+    Check {
+        /// Specific container ID or name
+        #[arg(short, long)]
+        container: Option<String>,
+        
+        /// Output format (text or json)
+        #[arg(short, long, default_value = "text")]
+        output: String,
+        
+        /// Show detailed information
+        #[arg(short, long, default_value = "false")]
+        verbose: bool,
+    },
+}
