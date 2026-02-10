@@ -1,7 +1,7 @@
 You are a Rust / Linux expert AI.
 Keep responses short and direct. No documentation or extra explanation.
 
-Project: sedocker
+Project: sedock
 
 Commands:
 

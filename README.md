@@ -1,4 +1,4 @@
-# sedocker - Docker Monitoring and Inspection Tool
+# sedock - Docker Monitoring and Inspection Tool
 
 A lightweight, dependency-free tool for monitoring Docker containers and file access.
 
@@ -13,21 +13,21 @@ A lightweight, dependency-free tool for monitoring Docker containers and file ac
 cargo build --release --target x86_64-unknown-linux-musl
 
 # The binary is completely standalone
-./target/x86_64-unknown-linux-musl/release/sedocker
+./target/x86_64-unknown-linux-musl/release/sedock
 ```
 
 ## Usage
 
 ### Monitor file access
 ```bash
-sedocker monitor -d /docker/mysql/data
+sedock monitor -d /docker/mysql/data
 ```
 
 ### Collect Docker information
 ```bash
-sedocker check
-sedocker check --container <container_id>
-sedocker check --output json
+sedock check
+sedock check --container <container_id>
+sedock check --output json
 ```
 
 ## Building

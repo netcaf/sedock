@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "sedocker")]
+#[command(name = "sedock")]
 #[command(about = "Docker monitoring and inspection tool", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]

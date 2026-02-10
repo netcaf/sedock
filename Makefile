@@ -1,7 +1,7 @@
 .PHONY: all build release install clean help
 
 TARGET := x86_64-unknown-linux-musl
-BINARY := sedocker
+BINARY := sedock
 
 all: build
 

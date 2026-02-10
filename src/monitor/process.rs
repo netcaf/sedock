@@ -1,6 +1,60 @@
 use crate::utils::{ProcessInfo, Result, SedockerError};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+
+/// 启动时扫描常见 bin 目录，构建 name→path 查找表
+/// 事件处理时只需 O(1) HashMap 查找，零磁盘 I/O
+pub struct BinPathCache {
+    map: HashMap<String, String>,
+}
+
+impl BinPathCache {
+    pub fn new() -> Self {
+        let mut dirs: Vec<String> = vec![
+            "/usr/bin".into(),
+            "/bin".into(),
+            "/usr/sbin".into(),
+            "/sbin".into(),
+            "/usr/local/bin".into(),
+            "/usr/local/sbin".into(),
+        ];
+        // 追加 PATH 中的额外目录（如 /opt/xxx/bin, /home/xxx/.local/bin 等）
+        if let Ok(path_env) = std::env::var("PATH") {
+            for p in path_env.split(':') {
+                if !p.is_empty() && !dirs.iter().any(|d| d == p) {
+                    dirs.push(p.to_string());
+                }
+            }
+        }
+        let mut map = HashMap::with_capacity(2048);
+        for dir in &dirs {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        map.entry(name.to_string())
+                            .or_insert_with(|| entry.path().to_string_lossy().into_owned());
+                    }
+                }
+            }
+        }
+        map.shrink_to_fit();
+        Self { map }
+    }
+
+    /// O(1) 查找，找不到返回 None
+    pub fn resolve(&self, name: &str) -> Option<&str> {
+        self.map.get(name).map(|s| s.as_str())
+    }
+}
+
+// Deref so callers get transparent HashMap access
+impl std::ops::Deref for BinPathCache {
+    type Target = HashMap<String, String>;
+    fn deref(&self) -> &Self::Target {
+        &self.map
+    }
+}
 
 /// 从 PID 获取 UID 和 GID
 pub fn get_ids_from_pid(pid: i32) -> Result<(u32, u32)> {
@@ -75,7 +129,15 @@ pub fn get_process_path(pid: i32) -> Result<String> {
         }
     }
     
-    // 方法3: 使用 comm（最后手段）
+    // 方法3: 使用 comm（最后手段，返回短名称，由调用方解析完整路径）
+    let comm_path = format!("/proc/{}/comm", pid);
+    if let Ok(content) = fs::read_to_string(&comm_path) {
+        let name = content.trim();
+        if !name.is_empty() {
+            return Ok(name.to_string());
+        }
+    }
+
     Ok(format!("[{}]", pid))
 }
 
@@ -148,7 +210,7 @@ pub fn get_container_pid(host_pid: i32) -> Option<i32> {
 }
 
 /// 获取完整的进程信息（优化版：只读取一次status）
-pub fn get_process_info(pid: i32) -> Result<ProcessInfo> {
+pub fn get_process_info(pid: i32, bin_cache: &BinPathCache) -> Result<ProcessInfo> {
     // 一次性读取 status 文件，获取多个字段
     let status_path = format!("/proc/{}/status", pid);
     let status_content = fs::read_to_string(&status_path)
@@ -197,7 +259,17 @@ pub fn get_process_info(pid: i32) -> Result<ProcessInfo> {
     
     // 获取 exe 路径（仍需单独读取）
     let exe = get_process_path(pid)?;
-    
+    // 如果 exe 只拿到短名称或 [pid]，通过 BinPathCache O(1) 查找完整路径
+    let exe = if !exe.contains('/') {
+        // 短名称（来自 comm），尝试解析
+        bin_cache.resolve(&exe).unwrap_or(&exe).to_string()
+    } else if exe.starts_with('[') && comm != "unknown" {
+        // [pid] 格式，用 status 中的 Name 字段解析
+        bin_cache.resolve(&comm).unwrap_or(&comm).to_string()
+    } else {
+        exe
+    };
+
     Ok(ProcessInfo {
         pid,
         uid,

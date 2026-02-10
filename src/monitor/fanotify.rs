@@ -27,21 +27,27 @@ impl ProcessCache {
     }
     
     /// 获取进程路径，优先从缓存读取
-    fn get_or_fetch(&mut self, pid: i32) -> String {
+    fn get_or_fetch(&mut self, pid: i32, bin_cache: &process::BinPathCache) -> String {
         // 先查缓存
         if let Some(path) = self.cache.get(&pid) {
             return path.clone();
         }
-        
+
         // 缓存未命中，尝试读取当前进程路径
         if let Ok(path) = process::get_process_path(pid) {
-            // 只缓存有效路径（非 [pid] 格式）
-            if !path.starts_with('[') {
+            if path.contains('/') {
+                // 完整路径，缓存并返回
                 self.cache.put(pid, path.clone());
                 return path;
             }
+            if !path.starts_with('[') {
+                // 短名称（comm），尝试通过 BinPathCache 解析
+                let resolved = bin_cache.resolve(&path).unwrap_or(&path).to_string();
+                self.cache.put(pid, resolved.clone());
+                return resolved;
+            }
         }
-        
+
         // 无法获取，返回 pid 格式
         format!("[{}]", pid)
     }
@@ -127,6 +133,8 @@ pub fn start_monitoring(directory: &str, format: &str, verbose: bool) -> Result<
         Some(event::EventDeduplicator::new())
     };
     
+    // 启动时一次性扫描 bin 目录，后续 O(1) 查找
+    let bin_cache = process::BinPathCache::new();
     // 进程路径缓存（用于捕获短暂进程）
     let mut proc_cache = ProcessCache::new();
 
@@ -169,7 +177,7 @@ pub fn start_monitoring(directory: &str, format: &str, verbose: bool) -> Result<
             
             // **FIX: 立即读取进程信息，避免竞态条件**
             // 快速命令(cat/tail/head)可能在处理前就退出
-            let proc_info = match process::get_process_info(metadata.pid) {
+            let proc_info = match process::get_process_info(metadata.pid, &bin_cache) {
                 Ok(info) => {
                     // 成功读取，同时填充缓存
                     if !info.exe.starts_with('[') {
@@ -201,7 +209,7 @@ pub fn start_monitoring(directory: &str, format: &str, verbose: bool) -> Result<
             
             if should_process {
                 // 处理事件（传入已读取的进程信息和路径缓存）
-                if let Err(e) = handle_event(metadata, &file_path, format, proc_info, container_id, &mut proc_cache) {
+                if let Err(e) = handle_event(metadata, &file_path, format, proc_info, container_id, &mut proc_cache, &bin_cache) {
                     eprintln!("Error handling event: {}", e);
                 }
             }
@@ -229,6 +237,7 @@ fn handle_event(
     proc_info: Option<crate::utils::ProcessInfo>,
     container_id: Option<String>,
     proc_cache: &mut ProcessCache,
+    bin_cache: &process::BinPathCache,
 ) -> Result<()> {
     // 确定事件类型
     let event_type = if metadata.mask & FAN_MODIFY != 0 {
@@ -244,7 +253,7 @@ fn handle_event(
         (info.container_pid, info.uid, info.gid, info.exe)
     } else {
         // 进程已退出，从缓存获取路径
-        (None, 0, 0, proc_cache.get_or_fetch(metadata.pid))
+        (None, 0, 0, proc_cache.get_or_fetch(metadata.pid, bin_cache))
     };
     
     // 创建事件

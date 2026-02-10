@@ -1,4 +1,4 @@
-# sedocker Usage Guide
+# sedock Usage Guide
 
 ## Installation
 
@@ -9,7 +9,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Clone and build
 git clone <repo>
-cd sedocker
+cd sedock
 make setup
 make release
 
@@ -22,10 +22,10 @@ sudo make install
 The release binary is statically linked and has no dependencies:
 ```bash
 # Check dependencies (should show "statically linked")
-ldd sedocker
+ldd sedock
 
 # Copy to any Linux system
-scp sedocker user@remote:/usr/local/bin/
+scp sedock user@remote:/usr/local/bin/
 ```
 
 ## Commands
@@ -37,19 +37,19 @@ Monitor file access in a directory in real-time.
 **Basic Usage:**
 ```bash
 # Monitor a directory
-sudo sedocker monitor -d /docker/mysql/data
+sudo sedock monitor -d /docker/mysql/data
 ```
 
 **With Container Information:**
 ```bash
 # Show which container is accessing files
-sudo sedocker monitor -d /docker/mysql/data --show-container
+sudo sedock monitor -d /docker/mysql/data --show-container
 ```
 
 **JSON Output:**
 ```bash
 # Output in JSON format for parsing
-sudo sedocker monitor -d /docker/mysql/data -f json
+sudo sedock monitor -d /docker/mysql/data -f json
 ```
 
 **Output Example:**
@@ -67,27 +67,27 @@ Collect comprehensive Docker container information.
 **All Containers:**
 ```bash
 # Check all containers
-sudo sedocker check
+sudo sedock check
 ```
 
 **Specific Container:**
 ```bash
 # Check one container
-sudo sedocker check -c a6c8a98ddebb
+sudo sedock check -c a6c8a98ddebb
 # or by name
-sudo sedocker check -c mysql_container
+sudo sedock check -c mysql_container
 ```
 
 **Detailed Output:**
 ```bash
 # Include process information
-sudo sedocker check --verbose
+sudo sedock check --verbose
 ```
 
 **JSON Output:**
 ```bash
 # Machine-readable format
-sudo sedocker check -o json > containers.json
+sudo sedock check -o json > containers.json
 ```
 
 **Output Example:**
@@ -116,26 +116,26 @@ Container: a6c8a98ddebb
 ### Deployment Diagnostics
 ```bash
 # Collect all container info for support
-sedocker check -o json > deployment_info.json
+sedock check -o json > deployment_info.json
 
 # Monitor file access issues
-sedocker monitor -d /data --show-container
+sedock monitor -d /data --show-container
 ```
 
 ### Security Auditing
 ```bash
 # Monitor sensitive directories
-sedocker monitor -d /etc --show-container -f json | \
+sedock monitor -d /etc --show-container -f json | \
   tee security_audit.log
 ```
 
 ### Troubleshooting
 ```bash
 # Find which container is accessing files
-sedocker monitor -d /shared/data --show-container
+sedock monitor -d /shared/data --show-container
 
 # Check container configuration
-sedocker check -c problematic_container --verbose
+sedock check -c problematic_container --verbose
 ```
 
 ## Requirements
