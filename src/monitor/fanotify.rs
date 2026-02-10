@@ -34,7 +34,7 @@ extern "C" {
 
 pub fn start_monitoring(directory: &str, show_container: bool, format: &str) -> Result<()> {
     // 初始化 fanotify
-    let fan_fd = unsafe { fanotify_init(FAN_CLASS_NOTIF, libc::O_RDONLY) };
+    let fan_fd = unsafe { fanotify_init(FAN_CLASS_NOTIF, libc::O_RDONLY as u32) };
     if fan_fd < 0 {
         return Err(SedockerError::Fanotify(
             "Failed to initialize fanotify. Are you running as root?".to_string()

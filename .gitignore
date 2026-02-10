@@ -1,0 +1,27 @@
+**/target/
+/installer.run
+
+# Build artifacts
+/libs/
+/dist/
+
+# Test artifacts
+/tests/coverage/
+*.profraw
+*.profdata
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
