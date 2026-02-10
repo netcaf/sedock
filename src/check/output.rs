@@ -106,8 +106,15 @@ fn display_text(report: &CheckReport, verbose: bool) -> Result<()> {
 
     // ── Events ────────────────────────────────────────────────────────────
     if !report.events.is_empty() {
-        print_section(&format!("RECENT EVENTS ({})", report.events.len()));
-        for ev in &report.events {
+        let display_events = if verbose {
+            report.events.as_slice()
+        } else {
+            // 普通模式下只显示最后10个事件
+            let start = if report.events.len() > 10 { report.events.len() - 10 } else { 0 };
+            &report.events[start..]
+        };
+        print_section(&format!("RECENT EVENTS ({})", display_events.len()));
+        for ev in display_events {
             println!("  {}  [{:<12}] {:<10} {}",
                 ev.timestamp, ev.actor_name, ev.event_type, ev.action);
         }
@@ -140,6 +147,18 @@ fn display_container_text(c: &ContainerInfo, verbose: bool) {
         println!("      Finished   : {}", c.finished_at);
     }
     println!("      Restart    : {}  (count: {})", c.restart_policy, c.restart_count);
+    if !c.entrypoint.is_empty() {
+        println!("      Entrypoint : {}", c.entrypoint);
+    }
+    if !c.cmd.is_empty() {
+        println!("      Cmd        : {}", c.cmd);
+    }
+    if !c.working_dir.is_empty() {
+        println!("      Work dir   : {}", c.working_dir);
+    }
+    if !c.user.is_empty() {
+        println!("      User       : {}", c.user);
+    }
     if c.privileged {
         println!("      ⚠ Privileged mode");
     }
@@ -207,7 +226,7 @@ fn display_container_text(c: &ContainerInfo, verbose: bool) {
         }
     }
 
-    // verbose: 进程
+    // 进程 (现在在普通模式下也显示)
     if !c.processes.is_empty() {
         println!("      Processes  :");
         for p in &c.processes {
@@ -223,11 +242,18 @@ fn display_container_text(c: &ContainerInfo, verbose: bool) {
         }
     }
 
-    // 日志 tail
+    // 日志 tail (在普通模式下显示最后10行，verbose模式下显示全部)
     if let Some(logs) = &c.log_tail {
         if !logs.is_empty() {
-            println!("      Logs (last {}):", logs.len());
-            for line in logs {
+            let display_logs = if verbose { 
+                logs.as_slice() 
+            } else { 
+                // 普通模式下只显示最后10行
+                let start = if logs.len() > 10 { logs.len() - 10 } else { 0 };
+                &logs[start..]
+            };
+            println!("      Logs (last {}):", display_logs.len());
+            for line in display_logs {
                 println!("        {}", line);
             }
         }

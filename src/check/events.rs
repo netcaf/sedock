@@ -44,6 +44,34 @@ pub fn collect(since: &str) -> Vec<DockerEvent> {
         .collect()
 }
 
+pub fn collect_with_limit(since: &str, limit: usize) -> Vec<DockerEvent> {
+    let out = match Command::new("docker")
+        .args(&[
+            "events",
+            "--since", since,
+            "--until", "0s",  // 到"现在"截止，不阻塞
+            "--format", "{{json .}}",
+        ])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            eprintln!("warn: docker events: {}", String::from_utf8_lossy(&o.stderr));
+            return vec![];
+        }
+        Err(e) => {
+            eprintln!("warn: docker events failed: {}", e);
+            return vec![];
+        }
+    };
+
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| parse_event_line(line))
+        .take(limit)
+        .collect()
+}
+
 fn parse_event_line(line: &str) -> Option<DockerEvent> {
     let j: serde_json::Value = serde_json::from_str(line).ok()?;
 

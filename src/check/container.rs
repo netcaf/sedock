@@ -23,6 +23,10 @@ pub struct ContainerInfo {
     pub restart_count: i64,
     pub privileged: bool,
     pub env: Vec<String>,         // verbose 下才填充
+    pub cmd: String,
+    pub entrypoint: String,
+    pub working_dir: String,
+    pub user: String,
 
     // 网络
     pub ports: Vec<PortMapping>,

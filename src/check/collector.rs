@@ -30,10 +30,13 @@ pub fn collect_one(id: &str, verbose: bool) -> Result<ContainerInfo> {
     // 仅 running 容器才有 stats
     if info.status == "running" {
         info.resource_usage = fetch_stats(id);
-        info.log_tail       = fetch_logs(id, LOG_TAIL_LINES);
+        // 根据 verbose 模式决定日志行数
+        let log_lines = if verbose { "all" } else { "10" };
+        info.log_tail       = fetch_logs(id, log_lines);
     } else {
         // exited 容器也拿日志，有助于排障
-        info.log_tail = fetch_logs(id, LOG_TAIL_LINES);
+        let log_lines = if verbose { "all" } else { "10" };
+        info.log_tail = fetch_logs(id, log_lines);
     }
 
     Ok(info)
@@ -88,6 +91,22 @@ fn parse_inspect(c: &serde_json::Value, verbose: bool) -> Result<ContainerInfo> 
         .trim_start_matches('/').to_string();
     let image    = str_val(c, &["Config", "Image"]);
     let image_id = c["Image"].as_str().unwrap_or("").chars().take(19).collect();
+    let cmd = c["Config"]["Cmd"].as_array()
+        .map(|a| a.iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| s.to_string())
+            .collect::<Vec<String>>()
+            .join(" "))
+        .unwrap_or_default();
+    let entrypoint = c["Config"]["Entrypoint"].as_array()
+        .map(|a| a.iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| s.to_string())
+            .collect::<Vec<String>>()
+            .join(" "))
+        .unwrap_or_default();
+    let working_dir = str_val(c, &["Config", "WorkingDir"]);
+    let user = str_val(c, &["Config", "User"]);
 
     let status      = str_val(c, &["State", "Status"]);
     let exit_code   = c["State"]["ExitCode"].as_i64().unwrap_or(0);
@@ -117,17 +136,14 @@ fn parse_inspect(c: &serde_json::Value, verbose: bool) -> Result<ContainerInfo> 
     let mounts       = parse_mounts(c);
     let resource_config = parse_resource_config(c);
 
-    let processes = if verbose {
-        parse_process_info(c).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let processes = parse_process_info(c).unwrap_or_default();
 
     Ok(ContainerInfo {
         id, name, image, image_id,
         status, exit_code, oom_killed,
         created, started_at, finished_at,
         restart_policy, restart_count, privileged, env,
+        cmd, entrypoint, working_dir, user,
         ports, networks, network_mode, mounts,
         resource_config,
         resource_usage: None,
@@ -253,7 +269,45 @@ fn parse_process_info(c: &serde_json::Value) -> Option<Vec<ProcessInfo>> {
     let short_id = container_id.chars().take(12).collect::<String>();
     
     // Use docker top to get all processes in the container
-    collect_container_processes(&short_id)
+    let mut processes = collect_container_processes(&short_id)?;
+    
+    // Try to identify the main process (PID 1 in container)
+    // We can check if any process has PPID = 0 (orphaned) or is the entrypoint/cmd
+    if let Some(main_pid) = get_container_main_pid(&short_id, host_pid) {
+        for process in &mut processes {
+            if process.pid == main_pid {
+                // Mark this as the main process
+                // We'll add a flag or special handling in display
+            }
+        }
+    }
+    
+    Some(processes)
+}
+
+fn get_container_main_pid(_container_id: &str, host_pid: i32) -> Option<i32> {
+    // The main container process is the one with PID 1 in the container namespace
+    // We can try to get this from /proc/<host_pid>/status which shows NSpid
+    let status_path = format!("/proc/{}/status", host_pid);
+    if let Ok(content) = std::fs::read_to_string(&status_path) {
+        for line in content.lines() {
+            if line.starts_with("NSpid:") {
+                // NSpid shows PID in different namespaces
+                // Format: NSpid:  <host_pid>    <container_pid> ...
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 3 {
+                    if let Ok(container_ns_pid) = parts[2].parse::<i32>() {
+                        if container_ns_pid == 1 {
+                            return Some(host_pid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Fallback: the process with PPID = 0 (init process) is often the main one
+    None
 }
 
 fn collect_container_processes(container_id: &str) -> Option<Vec<ProcessInfo>> {
@@ -487,10 +541,17 @@ fn parse_stat_pair(s: &str) -> (u64, u64) {
 // ── docker logs ─────────────────────────────────────────────────────────────
 
 fn fetch_logs(id: &str, tail: &str) -> Option<Vec<String>> {
-    let out = Command::new("docker")
-        .args(&["logs", "--tail", tail, "--timestamps", id])
-        .output()
-        .ok()?;
+    let out = if tail == "all" {
+        Command::new("docker")
+            .args(&["logs", "--timestamps", id])
+            .output()
+            .ok()?
+    } else {
+        Command::new("docker")
+            .args(&["logs", "--tail", tail, "--timestamps", id])
+            .output()
+            .ok()?
+    };
 
     // docker logs 写 stderr
     let combined = [out.stdout.as_slice(), out.stderr.as_slice()].concat();

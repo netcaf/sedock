@@ -23,7 +23,11 @@ pub fn run_check(container: Option<String>, output_format: &str, verbose: bool) 
     };
 
     eprintln!("Collecting recent events...");
-    let ev = events::collect(events::default_since());
+    let ev = if verbose {
+        events::collect(events::default_since())
+    } else {
+        events::collect_with_limit(events::default_since(), 10)
+    };
 
     let report = CheckReport {
         collected_at: chrono::Local::now()
