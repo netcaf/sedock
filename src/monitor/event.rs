@@ -17,21 +17,20 @@ impl EventDeduplicator {
     }
     
     pub fn is_duplicate(&mut self, pid: i32, mask: u64, path: &str) -> bool {
-        if pid == self.last_pid && mask == self.last_mask && path == self.last_path {
-            return true;
-        }
+        let is_dup = pid == self.last_pid && mask == self.last_mask && path == self.last_path;
         
         self.last_pid = pid;
         self.last_mask = mask;
         self.last_path = path.to_string();
         
-        false
+        is_dup
     }
 }
 
 pub fn create_event(
     event_type: EventType,
     pid: i32,
+    container_pid: Option<i32>,
     uid: u32,
     gid: u32,
     process_path: String,
@@ -42,6 +41,7 @@ pub fn create_event(
         event_type: event_type.to_string(),
         timestamp: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         pid,
+        container_pid,
         uid,
         gid,
         process_path,

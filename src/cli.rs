@@ -16,13 +16,13 @@ pub enum Commands {
         #[arg(short, long)]
         directory: String,
         
-        /// Show container information
-        #[arg(long, default_value = "false")]
-        show_container: bool,
-        
         /// Output format (text or json)
         #[arg(short, long, default_value = "text")]
         format: String,
+        
+        /// Disable event deduplication (show all events)
+        #[arg(long)]
+        no_dedup: bool,
     },
     
     /// Check and collect Docker container information

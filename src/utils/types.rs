@@ -5,6 +5,7 @@ pub struct ProcessInfo {
     pub pid: i32,
     pub uid: u32,
     pub gid: u32,
+    pub container_pid: Option<i32>,
     pub comm: String,
     pub exe: String,
 }
@@ -33,6 +34,7 @@ pub struct FileAccessEvent {
     pub event_type: String,
     pub timestamp: String,
     pub pid: i32,
+    pub container_pid: Option<i32>,
     pub uid: u32,
     pub gid: u32,
     pub process_path: String,

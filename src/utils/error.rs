@@ -19,6 +19,9 @@ pub enum SedockerError {
     
     #[error("System error: {0}")]
     System(String),
+    
+    #[error("Process {0} no longer exists")]
+    ProcessGone(i32),
 }
 
 pub type Result<T> = std::result::Result<T, SedockerError>;

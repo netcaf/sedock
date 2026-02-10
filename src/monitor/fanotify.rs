@@ -2,6 +2,8 @@ use crate::monitor::{event, process};
 use crate::utils::{EventType, Result, SedockerError};
 use nix::sys::stat::Mode;
 use std::os::unix::io::RawFd;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 const FAN_CLASS_NOTIF: u32 = 0x00000000;
 const FAN_MARK_ADD: u32 = 0x00000001;
@@ -32,9 +34,23 @@ extern "C" {
     ) -> i32;
 }
 
-pub fn start_monitoring(directory: &str, show_container: bool, format: &str) -> Result<()> {
-    // 初始化 fanotify
-    let fan_fd = unsafe { fanotify_init(FAN_CLASS_NOTIF, libc::O_RDONLY as u32) };
+pub fn start_monitoring(directory: &str, format: &str, no_dedup: bool) -> Result<()> {
+    // 设置 Ctrl+C 处理
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+        eprintln!("\nCtrl+C received, exiting...");
+        std::process::exit(0);
+    }).expect("Error setting Ctrl-C handler");
+    
+    // 初始化 fanotify (使用 O_NONBLOCK 提高响应速度)
+    let fan_fd = unsafe { 
+        fanotify_init(
+            FAN_CLASS_NOTIF, 
+            (libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK) as u32
+        ) 
+    };
     if fan_fd < 0 {
         return Err(SedockerError::Fanotify(
             "Failed to initialize fanotify. Are you running as root?".to_string()
@@ -63,22 +79,37 @@ pub fn start_monitoring(directory: &str, show_container: bool, format: &str) -> 
     
     // 打印表头
     if format == "text" {
-        println!("{:<7} {:<6} {:<5} {:<5} {:<25} {:<15} {}",
-                 "EVENT", "PID", "UID", "GID", "PROCESS_PATH", "CONTAINER", "FILE_PATH");
-        println!("{}", "-".repeat(120));
+        println!("{:<7} {:<13} {:<5} {:<5} {:<25} {:<15} {}",
+                 "EVENT", "PID(H/C)", "UID", "GID", "PROCESS_PATH", "CONTAINER", "FILE_PATH");
+        println!("{}", "-".repeat(130));
     }
     
-    // 事件去重器
-    let mut dedup = event::EventDeduplicator::new();
+    // 事件去重器（可选）
+    let mut dedup = if no_dedup {
+        None
+    } else {
+        Some(event::EventDeduplicator::new())
+    };
     
-    // 事件循环
-    let mut buffer = vec![0u8; 4096];
-    loop {
+    // 事件循环（使用更大的缓冲区处理快速事件）
+    let mut buffer = vec![0u8; 16384]; // 4x增大，减少read()调用次数
+    while running.load(Ordering::SeqCst) {
         let len = unsafe {
             libc::read(fan_fd, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len())
         };
         
-        if len <= 0 {
+        if len < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EAGAIN) || err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                // 非阻塞模式下没有数据，短暂休眠避免CPU空转
+                std::thread::sleep(std::time::Duration::from_micros(100));
+                continue;
+            }
+            eprintln!("Read error: {}", err);
+            continue;
+        }
+        
+        if len == 0 {
             continue;
         }
         
@@ -96,10 +127,35 @@ pub fn start_monitoring(directory: &str, show_container: bool, format: &str) -> 
             // 获取文件路径
             let file_path = get_path_from_fd(metadata.fd);
             
-            // 去重检查
-            if !dedup.is_duplicate(metadata.pid, metadata.mask, &file_path) {
-                // 处理事件
-                if let Err(e) = handle_event(metadata, &file_path, show_container, format) {
+            // **FIX: 立即读取进程信息，避免竞态条件**
+            // 快速命令(cat/tail/head)可能在处理前就退出
+            let proc_info = match process::get_process_info(metadata.pid) {
+                Ok(info) => Some(info),
+                Err(SedockerError::ProcessGone(_)) => {
+                    // 进程已退出，仍输出基本信息
+                    None
+                }
+                Err(e) => {
+                    eprintln!("Error reading process info: {}", e);
+                    unsafe { libc::close(metadata.fd); }
+                    offset += metadata.event_len as usize;
+                    continue;
+                }
+            };
+            
+            // 获取容器信息
+            let container_id = process::get_container_id(metadata.pid);
+            
+            // 条件去重检查
+            let should_process = if let Some(ref mut d) = dedup {
+                !d.is_duplicate(metadata.pid, metadata.mask, &file_path)
+            } else {
+                true  // 禁用去重，处理所有事件
+            };
+            
+            if should_process {
+                // 处理事件（传入已读取的进程信息）
+                if let Err(e) = handle_event(metadata, &file_path, format, proc_info, container_id) {
                     eprintln!("Error handling event: {}", e);
                 }
             }
@@ -110,13 +166,22 @@ pub fn start_monitoring(directory: &str, show_container: bool, format: &str) -> 
             offset += metadata.event_len as usize;
         }
     }
+    
+    // 清理
+    unsafe { libc::close(fan_fd); }
+    if format == "text" {
+        eprintln!("\nMonitoring stopped.");
+    }
+    
+    Ok(())
 }
 
 fn handle_event(
     metadata: &FanotifyEventMetadata,
     file_path: &str,
-    show_container: bool,
     format: &str,
+    proc_info: Option<crate::utils::ProcessInfo>,
+    container_id: Option<String>,
 ) -> Result<()> {
     // 确定事件类型
     let event_type = if metadata.mask & FAN_MODIFY != 0 {
@@ -127,23 +192,22 @@ fn handle_event(
         EventType::Read
     };
     
-    // 获取进程信息
-    let proc_info = process::get_process_info(metadata.pid)?;
-    
-    // 获取容器信息（如果需要）
-    let container_id = if show_container {
-        process::get_container_id(metadata.pid)
+    // 处理进程信息
+    let (container_pid, uid, gid, exe) = if let Some(info) = proc_info {
+        (info.container_pid, info.uid, info.gid, info.exe)
     } else {
-        None
+        // 进程已退出，使用默认值但仍输出事件
+        (None, 0, 0, format!("<exited:{}>", metadata.pid))
     };
     
     // 创建事件
     let event = event::create_event(
         event_type,
         metadata.pid,
-        proc_info.uid,
-        proc_info.gid,
-        proc_info.exe,
+        container_pid,
+        uid,
+        gid,
+        exe,
         file_path.to_string(),
         container_id.clone(),
     );
@@ -152,9 +216,16 @@ fn handle_event(
     if format == "json" {
         println!("{}", serde_json::to_string(&event).unwrap());
     } else {
-        println!("[{:<5}] {:<6} {:<5} {:<5} {:<25} {:<15} {}",
+        // 格式化 PID 显示
+        let pid_display = if let Some(cpid) = event.container_pid {
+            format!("{}/{}", event.pid, cpid)
+        } else {
+            format!("{}", event.pid)
+        };
+        
+        println!("[{:<5}] {:<13} {:<5} {:<5} {:<25} {:<15} {}",
                  event.event_type,
-                 event.pid,
+                 pid_display,
                  event.uid,
                  event.gid,
                  truncate_string(&event.process_path, 25),

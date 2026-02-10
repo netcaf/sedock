@@ -10,8 +10,8 @@ fn main() {
     let cli = Cli::parse();
     
     let result = match cli.command {
-        Commands::Monitor { directory, show_container, format } => {
-            monitor::run_monitor(&directory, show_container, &format)
+        Commands::Monitor { directory, format, no_dedup } => {
+            monitor::run_monitor(&directory, &format, no_dedup)
         }
         Commands::Check { container, output, verbose } => {
             check::run_check(container, &output, verbose)
