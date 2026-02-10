@@ -1,6 +1,8 @@
 use crate::monitor::{event, process};
 use crate::utils::{EventType, Result, SedockerError};
+use lru::LruCache;
 use nix::sys::stat::Mode;
+use std::num::NonZeroUsize;
 use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -11,6 +13,40 @@ const FAN_OPEN: u64 = 0x00000020;
 const FAN_ACCESS: u64 = 0x00000001;
 const FAN_MODIFY: u64 = 0x00000002;
 const FAN_EVENT_ON_CHILD: u64 = 0x08000000;
+
+/// 进程路径缓存，用于捕获短暂进程的完整路径
+struct ProcessCache {
+    cache: LruCache<i32, String>,
+}
+
+impl ProcessCache {
+    fn new() -> Self {
+        Self {
+            cache: LruCache::new(NonZeroUsize::new(1000).unwrap()),
+        }
+    }
+    
+    /// 获取进程路径，优先从缓存读取
+    fn get_or_fetch(&mut self, pid: i32) -> String {
+        // 先查缓存
+        if let Some(path) = self.cache.get(&pid) {
+            return path.clone();
+        }
+        
+        // 缓存未命中，尝试读取当前进程路径
+        if let Ok(path) = process::get_process_path(pid) {
+            // 只缓存有效路径（非 [pid] 格式）
+            if !path.starts_with('[') {
+                self.cache.put(pid, path.clone());
+                return path;
+            }
+        }
+        
+        // 无法获取，返回 pid 格式
+        format!("[{}]", pid)
+    }
+}
+
 
 #[repr(C)]
 struct FanotifyEventMetadata {
@@ -34,7 +70,7 @@ extern "C" {
     ) -> i32;
 }
 
-pub fn start_monitoring(directory: &str, format: &str, no_dedup: bool) -> Result<()> {
+pub fn start_monitoring(directory: &str, format: &str, verbose: bool) -> Result<()> {
     // 设置 Ctrl+C 处理
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -85,11 +121,15 @@ pub fn start_monitoring(directory: &str, format: &str, no_dedup: bool) -> Result
     }
     
     // 事件去重器（可选）
-    let mut dedup = if no_dedup {
+    let mut dedup = if verbose {
         None
     } else {
         Some(event::EventDeduplicator::new())
     };
+    
+    // 进程路径缓存（用于捕获短暂进程）
+    let mut proc_cache = ProcessCache::new();
+
     
     // 事件循环（使用更大的缓冲区处理快速事件）
     let mut buffer = vec![0u8; 16384]; // 4x增大，减少read()调用次数
@@ -130,7 +170,13 @@ pub fn start_monitoring(directory: &str, format: &str, no_dedup: bool) -> Result
             // **FIX: 立即读取进程信息，避免竞态条件**
             // 快速命令(cat/tail/head)可能在处理前就退出
             let proc_info = match process::get_process_info(metadata.pid) {
-                Ok(info) => Some(info),
+                Ok(info) => {
+                    // 成功读取，同时填充缓存
+                    if !info.exe.starts_with('[') {
+                        proc_cache.cache.put(metadata.pid, info.exe.clone());
+                    }
+                    Some(info)
+                }
                 Err(SedockerError::ProcessGone(_)) => {
                     // 进程已退出，仍输出基本信息
                     None
@@ -154,8 +200,8 @@ pub fn start_monitoring(directory: &str, format: &str, no_dedup: bool) -> Result
             };
             
             if should_process {
-                // 处理事件（传入已读取的进程信息）
-                if let Err(e) = handle_event(metadata, &file_path, format, proc_info, container_id) {
+                // 处理事件（传入已读取的进程信息和路径缓存）
+                if let Err(e) = handle_event(metadata, &file_path, format, proc_info, container_id, &mut proc_cache) {
                     eprintln!("Error handling event: {}", e);
                 }
             }
@@ -182,6 +228,7 @@ fn handle_event(
     format: &str,
     proc_info: Option<crate::utils::ProcessInfo>,
     container_id: Option<String>,
+    proc_cache: &mut ProcessCache,
 ) -> Result<()> {
     // 确定事件类型
     let event_type = if metadata.mask & FAN_MODIFY != 0 {
@@ -196,8 +243,8 @@ fn handle_event(
     let (container_pid, uid, gid, exe) = if let Some(info) = proc_info {
         (info.container_pid, info.uid, info.gid, info.exe)
     } else {
-        // 进程已退出，使用默认值但仍输出事件
-        (None, 0, 0, format!("<exited:{}>", metadata.pid))
+        // 进程已退出，从缓存获取路径
+        (None, 0, 0, proc_cache.get_or_fetch(metadata.pid))
     };
     
     // 创建事件

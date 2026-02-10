@@ -4,7 +4,7 @@ pub mod event;
 
 use crate::utils::Result;
 
-pub fn run_monitor(directory: &str, format: &str, no_dedup: bool) -> Result<()> {
+pub fn run_monitor(directory: &str, format: &str, verbose: bool) -> Result<()> {
     // 验证目录存在
     if !std::path::Path::new(directory).exists() {
         return Err(crate::utils::SedockerError::System(
@@ -20,11 +20,11 @@ pub fn run_monitor(directory: &str, format: &str, no_dedup: bool) -> Result<()> 
     }
     
     println!("Starting file access monitor on: {}", directory);
-    if no_dedup {
+    if verbose {
         println!("Deduplication: DISABLED (showing all events)");
     }
     println!("Press Ctrl+C to stop\n");
     
     // 启动 fanotify 监控
-    fanotify::start_monitoring(directory, format, no_dedup)
+    fanotify::start_monitoring(directory, format, verbose)
 }

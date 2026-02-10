@@ -1,0 +1,21 @@
+# target 构建产物
+target/
+
+# Git
+.git/
+.gitignore
+
+# 编辑器
+.vscode/
+.idea/
+
+# 大文件 / 数据
+*.log
+*.dump
+*.sqlite
+
+# 生成文件
+**/*.gen.rs
+
+# vendor
+vendor/

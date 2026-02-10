@@ -11,6 +11,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Monitor file access in a directory
+    #[command(arg_required_else_help = true)]
     Monitor {
         /// Directory to monitor
         #[arg(short, long)]
@@ -21,8 +22,8 @@ pub enum Commands {
         format: String,
         
         /// Disable event deduplication (show all events)
-        #[arg(long)]
-        no_dedup: bool,
+        #[arg(short, long)]
+        verbose: bool,
     },
     
     /// Check and collect Docker container information
