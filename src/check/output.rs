@@ -163,6 +163,22 @@ fn display_container_text(c: &ContainerInfo, verbose: bool) {
         println!("      ⚠ Privileged mode");
     }
 
+    // 进程 (现在在普通模式下也显示，放在基本信息之后)
+    if !c.processes.is_empty() {
+        println!("      Processes  :");
+        for p in &c.processes {
+            let exe_info = p.exe_path.as_ref()
+                .map(|path| format!(" → {}", path))
+                .unwrap_or_default();
+            let cwd_info = p.cwd.as_ref()
+                .map(|cwd| format!(" (cwd: {})", cwd))
+                .unwrap_or_default();
+            
+            println!("        PID {} (PPID {})  {}:{}  {}{}{}",
+                p.pid, p.ppid, p.uid, p.gid, p.cmd, exe_info, cwd_info);
+        }
+    }
+
     if !c.ports.is_empty() {
         println!("      Ports:");
         for p in &c.ports {
@@ -216,22 +232,6 @@ fn display_container_text(c: &ContainerInfo, verbose: bool) {
         println!("                   Net rx={} tx={}  Blk r={} w={}",
             fmt_bytes(u.net_rx), fmt_bytes(u.net_tx),
             fmt_bytes(u.block_read), fmt_bytes(u.block_write));
-    }
-
-    // 进程 (现在在普通模式下也显示)
-    if !c.processes.is_empty() {
-        println!("      Processes  :");
-        for p in &c.processes {
-            let exe_info = p.exe_path.as_ref()
-                .map(|path| format!(" → {}", path))
-                .unwrap_or_default();
-            let cwd_info = p.cwd.as_ref()
-                .map(|cwd| format!(" (cwd: {})", cwd))
-                .unwrap_or_default();
-            
-            println!("        PID {} (PPID {})  {}:{}  {}{}{}",
-                p.pid, p.ppid, p.uid, p.gid, p.cmd, exe_info, cwd_info);
-        }
     }
 
     // verbose: env
