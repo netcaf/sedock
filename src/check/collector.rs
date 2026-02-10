@@ -117,10 +117,10 @@ fn parse_inspect(c: &serde_json::Value, verbose: bool) -> Result<ContainerInfo> 
     let mounts       = parse_mounts(c);
     let resource_config = parse_resource_config(c);
 
-    let process_info = if verbose {
-        parse_process_info(c)
+    let processes = if verbose {
+        parse_process_info(c).unwrap_or_default()
     } else {
-        None
+        Vec::new()
     };
 
     Ok(ContainerInfo {
@@ -132,7 +132,7 @@ fn parse_inspect(c: &serde_json::Value, verbose: bool) -> Result<ContainerInfo> 
         resource_config,
         resource_usage: None,
         log_tail: None,
-        process_info,
+        processes,
     })
 }
 
@@ -244,23 +244,167 @@ fn parse_resource_config(c: &serde_json::Value) -> ResourceConfig {
     }
 }
 
-fn parse_process_info(c: &serde_json::Value) -> Option<ProcessInfo> {
+fn parse_process_info(c: &serde_json::Value) -> Option<Vec<ProcessInfo>> {
     let host_pid = c["State"]["Pid"].as_i64()? as i32;
     if host_pid <= 0 { return None; }
 
-    let status_path = format!("/proc/{}/status", host_pid);
-    let uid = std::fs::read_to_string(&status_path).ok()
-        .and_then(|s| s.lines()
-            .find(|l| l.starts_with("Uid:"))
-            .and_then(|l| l.split_whitespace().nth(1))
-            .and_then(|v| v.parse().ok()))
-        .unwrap_or(0);
+    // Get container ID from inspect JSON
+    let container_id = c["Id"].as_str()?;
+    let short_id = container_id.chars().take(12).collect::<String>();
+    
+    // Use docker top to get all processes in the container
+    collect_container_processes(&short_id)
+}
 
-    let cmd = std::fs::read_to_string(format!("/proc/{}/cmdline", host_pid)).ok()
-        .map(|s| s.replace('\0', " ").trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+fn collect_container_processes(container_id: &str) -> Option<Vec<ProcessInfo>> {
+    use std::process::Command;
+    
+    // Run docker top to get PIDs and commands
+    let output = Command::new("docker")
+        .args(&["top", container_id, "-eo", "pid,ppid,cmd"])
+        .output()
+        .ok()?;
+    
+    if !output.status.success() {
+        return None;
+    }
+    
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    
+    // Skip header line
+    if lines.len() < 2 {
+        return Some(Vec::new());
+    }
+    
+    let mut processes = Vec::new();
+    
+    for line in lines.iter().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        
+        let pid = parts[0].parse().unwrap_or(0);
+        let ppid = parts[1].parse().unwrap_or(0);
+        
+        // cmd might contain spaces, so join remaining parts
+        let cmd = parts[2..].join(" ");
+        
+        // Get uid/gid from /proc
+        let (uid, gid) = get_process_uid_gid(pid);
+        
+        // Get user and group names from container filesystem
+        let (user, group) = get_container_user_group(container_id, uid, gid);
+        
+        // Try to get executable path from /proc
+        let exe_path = get_process_exe_path(pid);
+        let cwd = get_process_cwd(pid);
+        
+        processes.push(ProcessInfo {
+            pid,
+            ppid,
+            uid,
+            gid,
+            user,
+            group,
+            cmd,
+            exe_path,
+            cwd,
+        });
+    }
+    
+    Some(processes)
+}
 
-    Some(ProcessInfo { host_pid, uid, cmd })
+fn get_container_user_group(container_id: &str, uid: u32, gid: u32) -> (String, String) {
+    use std::process::Command;
+    
+    // Try to get user name from container's /etc/passwd
+    let user_output = Command::new("docker")
+        .args(&["exec", container_id, "getent", "passwd", &uid.to_string()])
+        .output();
+    
+    let user = match user_output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout)
+                .split(':')
+                .nth(0)
+                .unwrap_or(&uid.to_string())
+                .to_string()
+        }
+        _ => uid.to_string(),
+    };
+    
+    // Try to get group name from container's /etc/group
+    let group_output = Command::new("docker")
+        .args(&["exec", container_id, "getent", "group", &gid.to_string()])
+        .output();
+    
+    let group = match group_output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout)
+                .split(':')
+                .nth(0)
+                .unwrap_or(&gid.to_string())
+                .to_string()
+        }
+        _ => gid.to_string(),
+    };
+    
+    (user, group)
+}
+
+fn get_process_uid_gid(pid: i32) -> (u32, u32) {
+    if pid <= 0 {
+        return (0, 0);
+    }
+    
+    let status_path = format!("/proc/{}/status", pid);
+    if let Ok(content) = std::fs::read_to_string(&status_path) {
+        let mut uid = 0;
+        let mut gid = 0;
+        
+        for line in content.lines() {
+            if line.starts_with("Uid:") {
+                if let Some(uid_str) = line.split_whitespace().nth(1) {
+                    uid = uid_str.parse().unwrap_or(0);
+                }
+            } else if line.starts_with("Gid:") {
+                if let Some(gid_str) = line.split_whitespace().nth(1) {
+                    gid = gid_str.parse().unwrap_or(0);
+                }
+            }
+        }
+        
+        return (uid, gid);
+    }
+    
+    (0, 0)
+}
+
+fn get_process_exe_path(pid: i32) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
+    
+    let exe_path = format!("/proc/{}/exe", pid);
+    match std::fs::read_link(&exe_path) {
+        Ok(path) => Some(path.to_string_lossy().to_string()),
+        Err(_) => None,
+    }
+}
+
+fn get_process_cwd(pid: i32) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
+    
+    let cwd_path = format!("/proc/{}/cwd", pid);
+    match std::fs::read_link(&cwd_path) {
+        Ok(path) => Some(path.to_string_lossy().to_string()),
+        Err(_) => None,
+    }
 }
 
 // ── docker stats ─────────────────────────────────────────────────────────────

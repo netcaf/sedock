@@ -208,8 +208,19 @@ fn display_container_text(c: &ContainerInfo, verbose: bool) {
     }
 
     // verbose: 进程
-    if let Some(p) = &c.process_info {
-        println!("      Process    : pid={}  uid={}  cmd={}", p.host_pid, p.uid, p.cmd);
+    if !c.processes.is_empty() {
+        println!("      Processes  :");
+        for p in &c.processes {
+            let exe_info = p.exe_path.as_ref()
+                .map(|path| format!(" → {}", path))
+                .unwrap_or_default();
+            let cwd_info = p.cwd.as_ref()
+                .map(|cwd| format!(" (cwd: {})", cwd))
+                .unwrap_or_default();
+            
+            println!("        PID {} (PPID {})  {}:{}  {}{}{}",
+                p.pid, p.ppid, p.uid, p.gid, p.cmd, exe_info, cwd_info);
+        }
     }
 
     // 日志 tail

@@ -41,8 +41,8 @@ pub struct ContainerInfo {
     // 日志 tail
     pub log_tail: Option<Vec<String>>,
 
-    // 进程信息（verbose，来自 /proc）
-    pub process_info: Option<ProcessInfo>,
+    // 进程信息（verbose，来自 docker top）
+    pub processes: Vec<ProcessInfo>,
 }
 
 // ── 网络 ────────────────────────────────────────────────────────────────────
@@ -114,7 +114,13 @@ pub struct ResourceUsage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessInfo {
-    pub host_pid: i32,
+    pub pid: i32,
+    pub ppid: i32,
     pub uid: u32,
+    pub gid: u32,
+    pub user: String,
+    pub group: String,
     pub cmd: String,
+    pub exe_path: Option<String>,
+    pub cwd: Option<String>,
 }
