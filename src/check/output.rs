@@ -147,12 +147,10 @@ fn display_container_text(c: &ContainerInfo, verbose: bool) {
         println!("      Finished   : {}", c.finished_at);
     }
     println!("      Restart    : {}  (count: {})", c.restart_policy, c.restart_count);
-    if !c.entrypoint.is_empty() {
-        println!("      Entrypoint : {}", c.entrypoint);
-    }
-    if !c.cmd.is_empty() {
-        println!("      Cmd        : {}", c.cmd);
-    }
+    println!("      Entrypoint : {}", if c.entrypoint.is_empty() { "(none)" } else { &c.entrypoint });
+    println!("      Cmd        : {}", if c.cmd.is_empty() { "(none)" } else { &c.cmd });
+    println!("      Path       : {}", if c.path.is_empty() { "(none)" } else { &c.path });
+    println!("      Args       : {}", if c.args.is_empty() { "(none)" } else { &c.args });
     if !c.working_dir.is_empty() {
         println!("      Work dir   : {}", c.working_dir);
     }

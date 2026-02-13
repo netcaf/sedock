@@ -24,6 +24,8 @@ pub struct ContainerInfo {
     pub env: Vec<String>,         // verbose 下才填充
     pub cmd: String,
     pub entrypoint: String,
+    pub path: String,
+    pub args: String,
     pub working_dir: String,
     pub user: String,
 

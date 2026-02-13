@@ -104,6 +104,14 @@ fn parse_inspect(c: &serde_json::Value, _verbose: bool) -> Result<ContainerInfo>
             .collect::<Vec<String>>()
             .join(" "))
         .unwrap_or_default();
+    let path = str_val(c, &["Path"]);
+    let args = c["Args"].as_array()
+        .map(|a| a.iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| s.to_string())
+            .collect::<Vec<String>>()
+            .join(" "))
+        .unwrap_or_default();
     let working_dir = str_val(c, &["Config", "WorkingDir"]);
     let user = str_val(c, &["Config", "User"]);
 
@@ -140,7 +148,7 @@ fn parse_inspect(c: &serde_json::Value, _verbose: bool) -> Result<ContainerInfo>
         status, exit_code, oom_killed,
         created, started_at, finished_at,
         restart_policy, restart_count, env,
-        cmd, entrypoint, working_dir, user,
+        cmd, entrypoint, path, args, working_dir, user,
         security: security_config,
         ports, networks, network_mode, mounts,
         resource_config,
