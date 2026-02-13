@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "sedock")]
+#[command(version = concat!(env!("CARGO_PKG_VERSION"), " (built ", env!("BUILD_TIME"), ")"))]
 #[command(about = "Docker monitoring and inspection tool", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
