@@ -15,6 +15,7 @@ pub enum EventType {
     Open,
     Read,
     Write,
+    #[allow(dead_code)]
     Modify,
 }
 

@@ -3,7 +3,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;
-use crate::utils::SedockerError;
 
 const DEFAULT_SINCE: &str = "24h";
 

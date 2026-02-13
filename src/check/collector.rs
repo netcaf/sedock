@@ -5,7 +5,6 @@ use crate::check::container::*;
 use crate::utils::{Result, SedockerError};
 use std::process::Command;
 
-const LOG_TAIL_LINES: &str = "50";
 
 // ── 公开接口 ────────────────────────────────────────────────────────────────
 
@@ -85,7 +84,7 @@ fn docker_inspect(id: &str) -> Result<serde_json::Value> {
 
 // ── inspect パーサー ─────────────────────────────────────────────────────────
 
-fn parse_inspect(c: &serde_json::Value, verbose: bool) -> Result<ContainerInfo> {
+fn parse_inspect(c: &serde_json::Value, _verbose: bool) -> Result<ContainerInfo> {
     let id: String = c["Id"].as_str().unwrap_or("").chars().take(12).collect();
     let name = c["Name"].as_str().unwrap_or("")
         .trim_start_matches('/').to_string();

@@ -1,7 +1,6 @@
 use crate::monitor::{event, process};
 use crate::utils::{EventType, Result, SedockerError};
 use lru::LruCache;
-use nix::sys::stat::Mode;
 use std::num::NonZeroUsize;
 use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -57,6 +57,7 @@ impl std::ops::Deref for BinPathCache {
 }
 
 /// 从 PID 获取 UID 和 GID
+#[allow(dead_code)]
 pub fn get_ids_from_pid(pid: i32) -> Result<(u32, u32)> {
     let status_path = format!("/proc/{}/status", pid);
     let content = fs::read_to_string(&status_path)
@@ -142,6 +143,7 @@ pub fn get_process_path(pid: i32) -> Result<String> {
 }
 
 /// 获取进程名称
+#[allow(dead_code)]
 pub fn get_process_comm(pid: i32) -> Result<String> {
     let comm_path = format!("/proc/{}/comm", pid);
     match fs::read_to_string(&comm_path) {
@@ -189,6 +191,7 @@ fn extract_container_id(line: &str) -> Option<String> {
 /// 
 /// 通过读取 /proc/{pid}/status 的 NSpid 字段
 /// NSpid 格式: "NSpid:  <host_pid> <container_pid>"
+#[allow(dead_code)]
 pub fn get_container_pid(host_pid: i32) -> Option<i32> {
     let status_path = format!("/proc/{}/status", host_pid);
     let content = fs::read_to_string(&status_path).ok()?;
