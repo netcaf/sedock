@@ -91,7 +91,7 @@ fn display_text(report: &CheckReport, verbose: bool) -> Result<()> {
     }
 
     println!("  daemon.json  : {}", e.daemon_config.config_file);
-    if verbose && !e.daemon_logs.is_empty() {
+    if !e.daemon_logs.is_empty() {
         println!("  Daemon logs (recent warnings):");
         for line in &e.daemon_logs {
             println!("    {}", line);
@@ -110,7 +110,6 @@ fn display_text(report: &CheckReport, verbose: bool) -> Result<()> {
         let display_events = if verbose {
             report.events.as_slice()
         } else {
-            // 普通模式下只显示最后10个事件
             let start = if report.events.len() > 10 { report.events.len() - 10 } else { 0 };
             &report.events[start..]
         };
@@ -157,14 +156,47 @@ fn display_container_text(c: &ContainerInfo, verbose: bool) {
     if !c.working_dir.is_empty() {
         println!("      Work dir   : {}", c.working_dir);
     }
+
+    // ── User ──────────────────────────────────────────────────────────────
     if !c.user.is_empty() {
         println!("      User       : {}", c.user);
     }
-    if c.privileged {
-        println!("      ⚠ Privileged mode");
+    // Running user info from processes
+    if !c.processes.is_empty() {
+        let mut seen = std::collections::BTreeSet::new();
+        for p in &c.processes {
+            seen.insert((p.uid, p.gid, p.user.clone(), p.group.clone()));
+        }
+        let user_strs: Vec<String> = seen.iter()
+            .map(|(uid, gid, user, group)| {
+                if user != &uid.to_string() || group != &gid.to_string() {
+                    format!("{}({}) : {}({})", user, uid, group, gid)
+                } else {
+                    format!("{}:{}", uid, gid)
+                }
+            })
+            .collect();
+        println!("      Run as     : {}", user_strs.join(", "));
+    }
+    // Users/Groups in container
+    if !c.users_groups.is_empty() {
+        println!("      Users/Groups:");
+        for ug in &c.users_groups {
+            let home_info = ug.home_dir.as_ref()
+                .map(|h| format!("  home: {}", h))
+                .unwrap_or_default();
+            let shell_info = ug.shell.as_ref()
+                .map(|s| format!("  shell: {}", s))
+                .unwrap_or_default();
+            println!("        {} (uid:{}) -> {} (gid:{}){}{}",
+                ug.username, ug.user_id, ug.group_name, ug.group_id, home_info, shell_info);
+        }
     }
 
-    // 进程 (现在在普通模式下也显示，放在基本信息之后)
+    // ── Security ──────────────────────────────────────────────────────────
+    display_security_section(&c.security);
+
+    // ── Processes ─────────────────────────────────────────────────────────
     if !c.processes.is_empty() {
         println!("      Processes  :");
         for p in &c.processes {
@@ -174,12 +206,13 @@ fn display_container_text(c: &ContainerInfo, verbose: bool) {
             let cwd_info = p.cwd.as_ref()
                 .map(|cwd| format!(" (cwd: {})", cwd))
                 .unwrap_or_default();
-            
+
             println!("        PID {} (PPID {})  {}:{}  {}{}{}",
                 p.pid, p.ppid, p.uid, p.gid, p.cmd, exe_info, cwd_info);
         }
     }
 
+    // ── Network ───────────────────────────────────────────────────────────
     if !c.ports.is_empty() {
         println!("      Ports:");
         for p in &c.ports {
@@ -196,25 +229,30 @@ fn display_container_text(c: &ContainerInfo, verbose: bool) {
     }
     println!("      Net mode   : {}", c.network_mode);
 
+    // ── Mounts ────────────────────────────────────────────────────────────
     if !c.mounts.is_empty() {
         println!("      Mounts:");
         for m in &c.mounts {
             println!("        [{}] {} → {}  {} {}",
                 m.mount_type, m.source, m.destination, m.mode,
                 if m.rw { "rw" } else { "ro" });
-            
+
             if !m.permissions.is_empty() {
-                println!("          Permissions (uid:gid mode):");
-                for p in &m.permissions {
-                    println!("            {:o} {}:{} {}",
-                        p.mode & 0o7777, p.uid, p.gid, p.path);
+                // Always show compact summary
+                display_mount_permissions_summary(&m.permissions);
+                // Verbose: also show full per-file listing
+                if verbose {
+                    println!("          Details (mode uid:gid path):");
+                    for p in &m.permissions {
+                        println!("            {:o} {}:{} {}",
+                            p.mode & 0o7777, p.uid, p.gid, p.path);
+                    }
                 }
-                println!("          ⚠ Please review permissions for security implications");
             }
         }
     }
 
-    // 资源配置
+    // ── Resources ─────────────────────────────────────────────────────────
     let rc = &c.resource_config;
     let mem_lim = if rc.memory_limit == 0 {
         "unlimited".to_string()
@@ -224,7 +262,6 @@ fn display_container_text(c: &ContainerInfo, verbose: bool) {
     println!("      Res config : cpu_shares={}  cpu_quota={}  mem_limit={}  pids={}",
         rc.cpu_shares, rc.cpu_quota, mem_lim, rc.pids_limit);
 
-    // 资源用量（stats）
     if let Some(u) = &c.resource_usage {
         println!("      Res usage  : CPU {:.2}%  MEM {} / {} ({:.1}%)  PIDs {}",
             u.cpu_percent,
@@ -235,21 +272,19 @@ fn display_container_text(c: &ContainerInfo, verbose: bool) {
             fmt_bytes(u.block_read), fmt_bytes(u.block_write));
     }
 
-    // verbose: env
-    if verbose && !c.env.is_empty() {
+    if !c.env.is_empty() {
         println!("      Env:");
         for e in &c.env {
             println!("        {}", e);
         }
     }
 
-    // 日志 tail (在普通模式下显示最后10行，verbose模式下显示全部)
+    // 日志 tail
     if let Some(logs) = &c.log_tail {
         if !logs.is_empty() {
-            let display_logs = if verbose { 
-                logs.as_slice() 
-            } else { 
-                // 普通模式下只显示最后10行
+            let display_logs = if verbose {
+                logs.as_slice()
+            } else {
                 let start = if logs.len() > 10 { logs.len() - 10 } else { 0 };
                 &logs[start..]
             };
@@ -261,6 +296,71 @@ fn display_container_text(c: &ContainerInfo, verbose: bool) {
     }
 
     println!();
+}
+
+/// Dedicated security section — always shown
+fn display_security_section(sec: &crate::check::container::SecurityConfig) {
+    println!("      Security   :");
+    if sec.privileged {
+        println!("        ⚠ PRIVILEGED MODE");
+    } else {
+        println!("        Privileged  : no");
+    }
+    if !sec.capabilities.is_empty() {
+        println!("        Cap added   : {}", sec.capabilities.join(", "));
+    } else {
+        println!("        Cap added   : (none)");
+    }
+    if sec.seccomp_profile.is_empty() || sec.seccomp_profile == "default" {
+        println!("        Seccomp     : default");
+    } else {
+        println!("        Seccomp     : {}", sec.seccomp_profile);
+    }
+    if sec.apparmor_profile.is_empty() || sec.apparmor_profile == "unconfined" {
+        println!("        AppArmor    : unconfined");
+    } else {
+        println!("        AppArmor    : {}", sec.apparmor_profile);
+    }
+    println!("        RO rootfs   : {}", if sec.read_only_rootfs { "yes" } else { "no" });
+    println!("        No new priv : {}", if sec.no_new_privileges { "yes" } else { "no" });
+}
+
+/// Compact mount permission summary — shown in both normal and verbose modes
+fn display_mount_permissions_summary(perms: &[crate::check::container::PathPermission]) {
+    use std::collections::BTreeMap;
+
+    let total = perms.len();
+
+    // Count by unique uid:gid
+    let mut owner_counts: BTreeMap<(u32, u32), usize> = BTreeMap::new();
+    for p in perms {
+        *owner_counts.entry((p.uid, p.gid)).or_insert(0) += 1;
+    }
+
+    // Count by file mode
+    let mut mode_counts: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut world_writable = 0usize;
+    for p in perms {
+        let m = p.mode & 0o7777;
+        *mode_counts.entry(m).or_insert(0) += 1;
+        if m & 0o002 != 0 { world_writable += 1; }
+    }
+
+    // Owner summary
+    let owners: Vec<String> = owner_counts.iter()
+        .map(|((uid, gid), cnt)| format!("{}:{} ({})", uid, gid, cnt))
+        .collect();
+    println!("          {} files  owners: {}", total, owners.join(", "));
+
+    // Mode summary
+    let modes: Vec<String> = mode_counts.iter()
+        .map(|(mode, cnt)| format!("{:o} ({})", mode, cnt))
+        .collect();
+    println!("          modes: {}", modes.join(", "));
+
+    if world_writable > 0 {
+        println!("          ⚠ {} world-writable", world_writable);
+    }
 }
 
 // ── 格式化工具 ───────────────────────────────────────────────────────────────

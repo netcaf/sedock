@@ -86,11 +86,11 @@ fn docker_inspect(id: &str) -> Result<serde_json::Value> {
 // ── inspect パーサー ─────────────────────────────────────────────────────────
 
 fn parse_inspect(c: &serde_json::Value, verbose: bool) -> Result<ContainerInfo> {
-    let id = c["Id"].as_str().unwrap_or("").chars().take(12).collect();
+    let id: String = c["Id"].as_str().unwrap_or("").chars().take(12).collect();
     let name = c["Name"].as_str().unwrap_or("")
         .trim_start_matches('/').to_string();
     let image    = str_val(c, &["Config", "Image"]);
-    let image_id = c["Image"].as_str().unwrap_or("").chars().take(19).collect();
+    let image_id = c["Image"].as_str().unwrap_or("").to_string();
     let cmd = c["Config"]["Cmd"].as_array()
         .map(|a| a.iter()
             .filter_map(|v| v.as_str())
@@ -117,38 +117,38 @@ fn parse_inspect(c: &serde_json::Value, verbose: bool) -> Result<ContainerInfo> 
 
     let restart_policy = str_val(c, &["HostConfig", "RestartPolicy", "Name"]);
     let restart_count  = c["RestartCount"].as_i64().unwrap_or(0);
-    let privileged     = c["HostConfig"]["Privileged"].as_bool().unwrap_or(false);
 
-    let env = if verbose {
-        c["Config"]["Env"].as_array()
-            .map(|a| a.iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| s.to_string())
-                .collect())
-            .unwrap_or_default()
-    } else {
-        vec![]
-    };
+    let env = c["Config"]["Env"].as_array()
+        .map(|a| a.iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| s.to_string())
+            .collect())
+        .unwrap_or_default();
 
     let ports        = parse_ports(c);
     let networks     = parse_networks(c);
     let network_mode = str_val(c, &["HostConfig", "NetworkMode"]);
     let mounts       = parse_mounts(c);
     let resource_config = parse_resource_config(c);
-
+    let security_config = parse_security_config(c);
     let processes = parse_process_info(c).unwrap_or_default();
+
+    // Collect users and groups from container (always, for normal mode display)
+    let users_groups = collect_users_groups(id.as_str()).unwrap_or_default();
 
     Ok(ContainerInfo {
         id, name, image, image_id,
         status, exit_code, oom_killed,
         created, started_at, finished_at,
-        restart_policy, restart_count, privileged, env,
+        restart_policy, restart_count, env,
         cmd, entrypoint, working_dir, user,
+        security: security_config,
         ports, networks, network_mode, mounts,
         resource_config,
         resource_usage: None,
         log_tail: None,
         processes,
+        users_groups,
     })
 }
 
@@ -558,6 +558,109 @@ fn fetch_logs(id: &str, tail: &str) -> Option<Vec<String>> {
     let s = String::from_utf8_lossy(&combined);
 
     Some(s.lines().map(String::from).collect())
+}
+
+// ── 安全配置解析 ─────────────────────────────────────────────────────────────
+
+fn parse_security_config(c: &serde_json::Value) -> SecurityConfig {
+    let hc = &c["HostConfig"];
+    
+    // 解析 capabilities
+    let capabilities = hc["CapAdd"].as_array()
+        .map(|arr| arr.iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| s.to_string())
+            .collect())
+        .unwrap_or_default();
+    
+    // 解析 seccomp 和 apparmor 配置
+    let seccomp_profile = hc["SecurityOpt"].as_array()
+        .and_then(|opts| {
+            opts.iter()
+                .filter_map(|v| v.as_str())
+                .find(|s| s.starts_with("seccomp="))
+                .map(|s| s.trim_start_matches("seccomp=").to_string())
+        })
+        .unwrap_or_default();
+    
+    let apparmor_profile = hc["SecurityOpt"].as_array()
+        .and_then(|opts| {
+            opts.iter()
+                .filter_map(|v| v.as_str())
+                .find(|s| s.starts_with("apparmor="))
+                .map(|s| s.trim_start_matches("apparmor=").to_string())
+        })
+        .unwrap_or_default();
+    
+    SecurityConfig {
+        privileged: hc["Privileged"].as_bool().unwrap_or(false),
+        capabilities,
+        seccomp_profile,
+        apparmor_profile,
+        read_only_rootfs: hc["ReadonlyRootfs"].as_bool().unwrap_or(false),
+        no_new_privileges: hc["NoNewPrivileges"].as_bool().unwrap_or(false),
+    }
+}
+
+// ── 用户和组收集 ─────────────────────────────────────────────────────────────
+
+fn collect_users_groups(container_id: &str) -> Result<Vec<UserGroupInfo>> {
+    use std::process::Command;
+    
+    // 获取容器内的所有用户
+    let users_output = Command::new("docker")
+        .args(&["exec", container_id, "getent", "passwd"])
+        .output()
+        .map_err(|e| SedockerError::Docker(format!("Failed to get users: {}", e)))?;
+    
+    if !users_output.status.success() {
+        return Ok(vec![]); // 容器可能没有 getent 或已停止
+    }
+    
+    let users_content = String::from_utf8_lossy(&users_output.stdout);
+    let mut users_groups = Vec::new();
+    
+    // 解析 /etc/passwd 格式: username:password:uid:gid:gecos:home:shell
+    for line in users_content.lines() {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() >= 7 {
+            let username = parts[0].to_string();
+            let user_id = parts[2].parse().unwrap_or(0);
+            let group_id = parts[3].parse().unwrap_or(0);
+            let home_dir = if !parts[5].is_empty() { Some(parts[5].to_string()) } else { None };
+            let shell = if !parts[6].is_empty() { Some(parts[6].to_string()) } else { None };
+            
+            // 获取组名
+            let group_name = get_group_name(container_id, group_id).unwrap_or_else(|| group_id.to_string());
+            
+            users_groups.push(UserGroupInfo {
+                username,
+                user_id,
+                group_name,
+                group_id,
+                home_dir,
+                shell,
+            });
+        }
+    }
+    
+    Ok(users_groups)
+}
+
+fn get_group_name(container_id: &str, gid: u32) -> Option<String> {
+    use std::process::Command;
+    
+    let output = Command::new("docker")
+        .args(&["exec", container_id, "getent", "group", &gid.to_string()])
+        .output()
+        .ok()?;
+    
+    if !output.status.success() {
+        return None;
+    }
+    
+    let content = String::from_utf8_lossy(&output.stdout);
+    content.split(':').next().map(|s| s.to_string())
 }
 
 // ── 工具 ────────────────────────────────────────────────────────────────────

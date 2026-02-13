@@ -21,12 +21,14 @@ pub struct ContainerInfo {
     // 配置
     pub restart_policy: String,
     pub restart_count: i64,
-    pub privileged: bool,
     pub env: Vec<String>,         // verbose 下才填充
     pub cmd: String,
     pub entrypoint: String,
     pub working_dir: String,
     pub user: String,
+
+    // 安全配置
+    pub security: SecurityConfig,
 
     // 网络
     pub ports: Vec<PortMapping>,
@@ -47,6 +49,9 @@ pub struct ContainerInfo {
 
     // 进程信息（verbose，来自 docker top）
     pub processes: Vec<ProcessInfo>,
+
+    // 用户和组信息
+    pub users_groups: Vec<UserGroupInfo>,
 }
 
 // ── 网络 ────────────────────────────────────────────────────────────────────
@@ -112,6 +117,30 @@ pub struct ResourceUsage {
     pub net_rx: u64,
     pub net_tx: u64,
     pub pids: u64,
+}
+
+// ── 安全配置 ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityConfig {
+    pub privileged: bool,
+    pub capabilities: Vec<String>,
+    pub seccomp_profile: String,
+    pub apparmor_profile: String,
+    pub read_only_rootfs: bool,
+    pub no_new_privileges: bool,
+}
+
+// ── 用户和组信息 ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserGroupInfo {
+    pub username: String,
+    pub user_id: u32,
+    pub group_name: String,
+    pub group_id: u32,
+    pub home_dir: Option<String>,
+    pub shell: Option<String>,
 }
 
 // ── 进程 ────────────────────────────────────────────────────────────────────
