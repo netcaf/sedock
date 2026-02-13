@@ -178,16 +178,30 @@ fn display_container_text(c: &ContainerInfo, verbose: bool) {
     }
     // Users/Groups in container
     if !c.users_groups.is_empty() {
+        // Calculate column widths for aligned output
+        let max_name = c.users_groups.iter()
+            .map(|ug| ug.username.len())
+            .max().unwrap_or(0);
+        let max_uid = c.users_groups.iter()
+            .map(|ug| ug.user_id.to_string().len())
+            .max().unwrap_or(0);
+        let max_group = c.users_groups.iter()
+            .map(|ug| ug.group_name.len())
+            .max().unwrap_or(0);
+        let max_gid = c.users_groups.iter()
+            .map(|ug| ug.group_id.to_string().len())
+            .max().unwrap_or(0);
+        let max_home = c.users_groups.iter()
+            .map(|ug| ug.home_dir.as_ref().map(|h| h.len()).unwrap_or(0))
+            .max().unwrap_or(0);
+
         println!("      Users/Groups:");
         for ug in &c.users_groups {
-            let home_info = ug.home_dir.as_ref()
-                .map(|h| format!("  home: {}", h))
-                .unwrap_or_default();
-            let shell_info = ug.shell.as_ref()
-                .map(|s| format!("  shell: {}", s))
-                .unwrap_or_default();
-            println!("        {} (uid:{}) -> {} (gid:{}){}{}",
-                ug.username, ug.user_id, ug.group_name, ug.group_id, home_info, shell_info);
+            let home = ug.home_dir.as_deref().unwrap_or("");
+            let shell = ug.shell.as_deref().unwrap_or("");
+            println!("        {:<nw$} (uid:{:<uw$})  {:<gw$} (gid:{:<dw$})  {:<hw$}  {}",
+                ug.username, ug.user_id, ug.group_name, ug.group_id, home, shell,
+                nw = max_name, uw = max_uid, gw = max_group, dw = max_gid, hw = max_home);
         }
     }
 
